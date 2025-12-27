@@ -14,3 +14,17 @@ ratings_with_merged_genres = ratings.merge(movies_exploded, on="movieId")
 # the avoided lists would also make using the users' profile very very hard, and much more complex during both creation and use.
 user_profile = ratings_with_merged_genres.groupby(
     ["userId", "genres"])["rating"].mean().unstack(fill_value=0)
+
+
+# in this part we want to find the unique genres for the one-hot encoding for the movies
+all_genres = sorted(
+    {genre for sublist in movies['genres'] for genre in sublist})
+
+# here we create the column of each genre for the one-hot encoding for the movies
+for genre in all_genres:
+    movies[genre] = movies["genres"].apply(lambda x: 1 if genre in x else 0)
+
+# here we drop the genres column since its useless
+movies = movies.drop("genres", axis=1)
+
+print(movies)
