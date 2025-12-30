@@ -90,4 +90,6 @@ for cluster_id, row in cluster_profiles.iterrows():
     top_genre = row.idxmax()
     cluster_names[cluster_id] = f"{top_genre} Fans"
 
+# putting the correct cluster names in the user profiles
+# each user id has a cluster next to it.
 user_profile['cluster_name'] = user_profile['cluster'].map(cluster_names)
