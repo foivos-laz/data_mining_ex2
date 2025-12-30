@@ -31,7 +31,7 @@ for genre in all_genres:
 # here we drop the genres column since its useless
 movies = movies.drop("genres", axis=1)
 
-print(user_profile.head())
+# print(user_profile.head())
 
 # Question: B
 X = user_profile[["(no genres listed)", "Action", "Adventure", "Animation", "Children", "Comedy", "Crime", "Documentary", "Drama",
@@ -59,13 +59,13 @@ for k in [3, 4, 5]:
     silhouette_scores[k] = score
     models[k] = kmeans
 
-    print(f"K = {k}, Silhouette Score = {score:.4f}")
+    # print(f"K = {k}, Silhouette Score = {score:.4f}")
 
 # find the best k for the clustering
 best_k = max(silhouette_scores, key=silhouette_scores.get)
 best_model = models[best_k]
 
-print(f"Best k = {best_k}")
+# print(f"Best k = {best_k}")
 
 # assining the clusters to the users
 user_profile['cluster'] = best_model.labels_
@@ -76,7 +76,7 @@ cluster_centers = scaler.inverse_transform(cluster_centers_scaled)
 
 cluster_profiles = pd.DataFrame(
     cluster_centers,
-    # here we take every other column (aka genre) except the cluster one.
+    # here we take every other column (aka genres) except the cluster one.
     columns=user_profile.columns.drop('cluster')
 )
 
@@ -91,5 +91,7 @@ for cluster_id, row in cluster_profiles.iterrows():
     cluster_names[cluster_id] = f"{top_genre} Fans"
 
 # putting the correct cluster names in the user profiles
-# each user id has a cluster next to it.
+# each user id has a cluster next to it
 user_profile['cluster_name'] = user_profile['cluster'].map(cluster_names)
+
+# Question: C
