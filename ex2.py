@@ -73,7 +73,7 @@ for genre in all_genres:
 # here we drop the genres column since its useless
 movies = movies.drop("genres", axis=1)
 
-print(movies.head())
+# print(movies.head())
 
 # Question: B
 X = user_profile[["(no genres listed)", "Action", "Adventure", "Animation", "Children", "Comedy", "Crime", "Documentary", "Drama",
@@ -294,3 +294,57 @@ def recommend_cf_cluster(user_id, ratings_train, user_profile, N, K):
     top_movies = sorted(pred_ratings.items(),
                         key=lambda x: x[1], reverse=True)[:K]
     return pd.DataFrame(top_movies, columns=['movieId', 'predicted_rating'])
+
+# Question D
+# here we calculate the MAE, Precision, Recall and Spearman Correlation
+
+
+def calculate_metrics(user_id, recommendations, ratings_test, user_mean, K):
+    if recommendations.empty:
+        return None
+
+    # movies in the test set for the user (the user_id)
+    user_test_data = ratings_test[ratings_test['userId'] == user_id]
+    if user_test_data.empty:
+        return None
+
+    # relevant movies in the test set aka where rating > user mean
+    relevant_test_items = user_test_data[user_test_data['rating']
+                                         > user_mean]['movieId'].values
+
+    # top K recommended movies
+    recommended_items = recommendations.index.tolist()  # movieId is index
+
+    # Intersection
+    hits = set(recommended_items).intersection(set(relevant_test_items))
+
+    # Precision @ K
+    precision = len(hits) / K
+
+    # Recall @ K
+    recall = len(hits) / \
+        len(relevant_test_items) if len(relevant_test_items) > 0 else 0
+
+    # MAE (only for the movies BOTH in the test set AND the recommendations)
+    common_movies = recommendations.index.intersection(
+        user_test_data['movieId'])
+    mae = np.nan
+
+    if len(common_movies) > 0:
+        preds = recommendations.loc[common_movies, 'score']
+        actuals = user_test_data.set_index(
+            'movieId').loc[common_movies, 'rating']
+
+        # here we calculate MAE only if the score is in the scale of a grade (aka >1, typically CF)
+        # or if we know that it is CF
+        if preds.mean() > 1.1:  # Heuristic: if it a rating (1-5) and not similarity (0-1)
+            mae = np.mean(np.abs(preds - actuals))
+
+    # Spearman Correlation
+    # correlation between the rank and the actual grade
+    spearman = np.nan
+    if len(common_movies) > 1:
+        spearman, _ = stats.spearmanr(recommendations.loc[common_movies, 'score'],
+                                      user_test_data.set_index('movieId').loc[common_movies, 'rating'])
+
+    return {"MAE": mae, "Precision": precision, "Recall": recall, "Spearman": spearman}
