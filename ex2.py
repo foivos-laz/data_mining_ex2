@@ -314,6 +314,8 @@ def run_experiment(config_list, experiment_name):
             # 2. Create User Profiles (Question A continuation)
             # we re-create profiles here to avoid data leakage
             movies_exploded = movies.explode("genres_list")
+            movies_exploded = movies_exploded.drop("genres", axis=1)
+
             ratings_merged = r_train.merge(movies_exploded.rename(
                 columns={'genres_list': 'genres'}), on="movieId")
 
@@ -399,7 +401,7 @@ def run_experiment(config_list, experiment_name):
                 # Run Systems
                 try:
                     recs = recommend_cb(
-                        user_profile.loc[uid], movie_profiles, K_val, all_genres)
+                        user_profile.loc[uid], movie_profiles, K_val)
                     m = calculate_metrics(uid, recs, r_test, u_mean, K_val)
                     if m:
                         metrics_acc["CB"].append(m)
@@ -416,7 +418,7 @@ def run_experiment(config_list, experiment_name):
 
                 try:
                     recs = recommend_cb_cluster(
-                        uid, user_profile, cluster_profiles, movie_profiles, K_val, all_genres)
+                        uid, user_profile, cluster_profiles, movie_profiles, K_val)
                     m = calculate_metrics(uid, recs, r_test, u_mean, K_val)
                     if m:
                         metrics_acc["CB_Cluster"].append(m)
