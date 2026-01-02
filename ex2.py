@@ -3,9 +3,13 @@ import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics.pairwise import cosine_similarity
 
 TEST_SPLIT = 0.3
 SEED = 123
+K = 10
+L = 3*K
+Ν = 20
 
 # Question: A
 movies = pd.read_csv('movies.csv')
@@ -69,7 +73,7 @@ for genre in all_genres:
 # here we drop the genres column since its useless
 movies = movies.drop("genres", axis=1)
 
-# print(user_profile.head())
+print(movies.head())
 
 # Question: B
 X = user_profile[["(no genres listed)", "Action", "Adventure", "Animation", "Children", "Comedy", "Crime", "Documentary", "Drama",
@@ -133,3 +137,160 @@ for cluster_id, row in cluster_profiles.iterrows():
 user_profile['cluster_name'] = user_profile['cluster'].map(cluster_names)
 
 # Question: C
+
+# this is basically the same as the normal movies, but here we simplify the table for the recommendation systems
+# as to avoid ifs and comparissons when calculating the cos sim.
+movie_profiles = movies.copy()
+movie_profiles.set_index('movieId', inplace=True)
+
+# in this function to calculate the pearson similarity, which we will use later
+
+
+def pearson_similarity(u1, u2):
+    mask = (u1 != 0) & (u2 != 0)
+    if np.sum(mask) < 2:
+        return 0.0
+    if np.std(u1[mask]) == 0 or np.std(u2[mask]) == 0:
+        return 0.0
+    return np.corrcoef(u1[mask], u2[mask])[0, 1]
+
+# Σύστημα βάση περιεχομένου:
+
+
+def recommend_cb(user_profile_row, movie_profiles, K):
+    # we create the vectors needed for the content based recommender to work
+    # and also we make the 1D user_profile into a 2D vector
+    user_vec = user_profile_row[all_genres].values.reshape(1, -1)
+    movie_vecs = movie_profiles[all_genres].values
+
+    # in this part of the recommender we find the cos similarities, which we then turn the 2D array into a 1D one
+    # then to find the top movies we sort them and
+    # then we inverse them to be in descending order and we pic the K highest rated ones
+    similarities = cosine_similarity(user_vec, movie_vecs).flatten()
+    top_indices = similarities.argsort()[::-1][:K]
+    return movie_profiles.iloc[top_indices].copy()
+
+# for the rest of the recommnder systems I will keep comments sparse for code legibility
+
+# Σύστημα συνεργατικού φιλτραρίσματος με βάση τους N κοντινότερους χρήστες:
+
+
+def recommend_cf(user_id, ratings_train, N, K):
+    user_ratings = ratings_train[ratings_train['userId'] == user_id]
+    user_mean = user_ratings['rating'].mean()
+
+    other_users = ratings_train[ratings_train['userId']
+                                != user_id]['userId'].unique()
+
+    sims = []
+    for other_id in other_users:
+        other_ratings = ratings_train[ratings_train['userId'] == other_id]
+        merged = pd.merge(user_ratings, other_ratings,
+                          on='movieId', suffixes=('_u', '_v'))
+        if len(merged) < 2:  # we need AT LEAST 2 common movies for the pearson algorithm
+            continue
+        sim = pearson_similarity(
+            merged['rating_u'].values, merged['rating_v'].values)
+        sims.append((other_id, sim))
+
+    sims.sort(key=lambda x: x[1], reverse=True)
+    top_neighbors = [uid for uid, s in sims[:N]]
+
+    # "συνάρτηση πρόβλεψης σταθμισμένο μέσο όρο με αφαίρεση bias"
+    pred_ratings = {}
+    for movie_id in ratings_train['movieId'].unique():
+        if movie_id in user_ratings['movieId'].values:
+            continue  # ignores the already rated ones
+        numerator = 0
+        denominator = 0
+        for neighbor_id in top_neighbors:
+            neighbor_ratings = ratings_train[(ratings_train['userId'] == neighbor_id) &
+                                             (ratings_train['movieId'] == movie_id)]
+            if neighbor_ratings.empty:
+                continue
+            neighbor_mean = ratings_train[ratings_train['userId']
+                                          == neighbor_id]['rating'].mean()
+            sim = dict(sims).get(neighbor_id, 0)
+            numerator += sim * \
+                (neighbor_ratings.iloc[0]['rating'] - neighbor_mean)
+            denominator += abs(sim)
+        if denominator > 0:
+            pred_ratings[movie_id] = user_mean + numerator / denominator
+
+    # we inverse them to be in descending order and we pic the K highest rated ones
+    top_movies = sorted(pred_ratings.items(),
+                        key=lambda x: x[1], reverse=True)[:K]
+    return pd.DataFrame(top_movies, columns=['movieId', 'predicted_rating'])
+
+# Σύστημα βάση περιεχομένου με βάση το cluster:
+
+
+def recommend_cb_cluster(user_id, user_profile, cluster_profiles, movie_profiles, K):
+    user_row = user_profile.loc[user_id]
+    cluster_id = user_row['cluster']
+    cluster_row = cluster_profiles.loc[cluster_id]
+
+    # here we choose L movies to compare based on the cos similarity
+    L = 3*K
+    cluster_vec = cluster_row[all_genres].values.reshape(1, -1)
+    movie_vecs = movie_profiles[all_genres].values
+    sims = cosine_similarity(cluster_vec, movie_vecs).flatten()
+    top_L_indices = sims.argsort()[::-1][:L]
+
+    # final K movies that get recommened
+    user_vec = user_row[all_genres].values.reshape(1, -1)
+    sims_user = cosine_similarity(
+        user_vec, movie_vecs[top_L_indices]).flatten()
+    top_K_indices = top_L_indices[sims_user.argsort()[::-1][:K]]
+    return movie_profiles.iloc[top_K_indices].copy()
+
+# Σύστημα συνεργατικού φιλτραρίσματος με βάση το cluster
+
+
+def recommend_cf_cluster(user_id, ratings_train, user_profile, N, K):
+    user_row = user_profile.loc[user_id]
+    cluster_id = user_row['cluster']
+
+    cluster_users = user_profile[user_profile['cluster']
+                                 == cluster_id].index.drop(user_id, errors='ignore')
+
+    user_ratings = ratings_train[ratings_train['userId'] == user_id]
+    user_mean = user_ratings['rating'].mean()
+
+    sims = []
+    for other_id in cluster_users:
+        other_ratings = ratings_train[ratings_train['userId'] == other_id]
+        merged = pd.merge(user_ratings, other_ratings,
+                          on='movieId', suffixes=('_u', '_v'))
+        if len(merged) < 2:
+            continue
+        sim = pearson_similarity(
+            merged['rating_u'].values, merged['rating_v'].values)
+        sims.append((other_id, sim))
+
+    sims.sort(key=lambda x: x[1], reverse=True)
+    top_neighbors = [uid for uid, s in sims[:N]]
+
+    pred_ratings = {}
+    for movie_id in ratings_train['movieId'].unique():
+        if movie_id in user_ratings['movieId'].values:
+            continue
+        numerator = 0
+        denominator = 0
+        for neighbor_id in top_neighbors:
+            neighbor_ratings = ratings_train[(ratings_train['userId'] == neighbor_id) &
+                                             (ratings_train['movieId'] == movie_id)]
+            if neighbor_ratings.empty:
+                continue
+            neighbor_mean = ratings_train[ratings_train['userId']
+                                          == neighbor_id]['rating'].mean()
+            sim = dict(sims).get(neighbor_id, 0)
+            numerator += sim * \
+                (neighbor_ratings.iloc[0]['rating'] - neighbor_mean)
+            denominator += abs(sim)
+        if denominator > 0:
+            pred_ratings[movie_id] = user_mean + numerator / denominator
+
+    top_movies = sorted(pred_ratings.items(),
+                        key=lambda x: x[1], reverse=True)[:K]
+    return pd.DataFrame(top_movies, columns=['movieId', 'predicted_rating'])
