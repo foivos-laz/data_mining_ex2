@@ -4,12 +4,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics.pairwise import cosine_similarity
-
-TEST_SPLIT = 0.3
-SEED = 123
-K = 10
-L = 3*K
-Ν = 20
+from scipy import stats
 
 # Question: A
 movies = pd.read_csv('movies.csv')
@@ -19,7 +14,7 @@ ratings = pd.read_csv('ratings.csv')
 # given the instructions "Για την αποτίμηση των συστημάτων θα χρησιμοποιήσετε διαχωρισμό σε σύνολο εκπαίδευσης/ελέγχου ανά χρήστη"
 
 
-def train_test_split_per_user(ratings, test_size=0.3, seed=42):
+def train_test_split_per_user(ratings, test_size, seed):
     np.random.seed(seed)
     train_parts = []
     test_parts = []
@@ -43,105 +38,7 @@ def train_test_split_per_user(ratings, test_size=0.3, seed=42):
         pd.concat(test_parts).reset_index(drop=True)
     )
 
-
-# we are splitting the data here since if we do it later, we might have data leakage, as well as
-# not evaluating the recommender systems very well or accurately
-ratings_train, ratings_test = train_test_split_per_user(
-    ratings, TEST_SPLIT, seed=SEED)
-
-# here we want to split the genres of each movie and put it in the ratings table
-# as to make it easier, because the current way they are formated isn't too helpful
-movies["genres"] = movies["genres"].str.split("|")
-movies_exploded = movies.explode("genres")
-ratings_with_merged_genres = ratings_train.merge(movies_exploded, on="movieId")
-
-# here we create the users as data frames that have the userID and the genres with their means.
-# it is important to have it as such, as to not lose the information of which genre is which with traditional list.
-# the avoided lists would also make using the users' profile very very hard, and much more complex during both creation and use.
-user_profile = ratings_with_merged_genres.groupby(
-    ["userId", "genres"])["rating"].mean().unstack(fill_value=0)
-
-
-# in this part we want to find the unique genres for the one-hot encoding for the movies
-all_genres = sorted(
-    {genre for sublist in movies['genres'] for genre in sublist})
-
-# here we create the column of each genre for the one-hot encoding for the movies
-for genre in all_genres:
-    movies[genre] = movies["genres"].apply(lambda x: 1 if genre in x else 0)
-
-# here we drop the genres column since its useless
-movies = movies.drop("genres", axis=1)
-
-# print(movies.head())
-
-# Question: B
-X = user_profile[["(no genres listed)", "Action", "Adventure", "Animation", "Children", "Comedy", "Crime", "Documentary", "Drama",
-                  "Fantasy", "Film-Noir", "Horror", "IMAX", "Musical", "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western"]]
-
-# we have to scale the because the silhouette score uses distances, and not scaling will not work very well
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
-
-silhouette_scores = {}
-models = {}
-
-# in this for loop we are checking each k in the kmeans and we are trying to see which one is the best
-# by first finding each silhouette score for each k and then storing both the model and the score in a table/ list
-for k in [3, 4, 5]:
-    kmeans = KMeans(
-        n_clusters=k,
-        random_state=575,
-        n_init='auto'
-    )
-
-    labels = kmeans.fit_predict(X_scaled)
-    score = silhouette_score(X_scaled, labels)
-
-    silhouette_scores[k] = score
-    models[k] = kmeans
-
-    # print(f"K = {k}, Silhouette Score = {score:.4f}")
-
-# find the best k for the clustering
-best_k = max(silhouette_scores, key=silhouette_scores.get)
-best_model = models[best_k]
-
-# print(f"Best k = {best_k}")
-
-# assining the clusters to the users
-user_profile['cluster'] = best_model.labels_
-
-# we had the scaled the clusters and since they are scaled we have to "unscale" them
-cluster_centers_scaled = best_model.cluster_centers_
-cluster_centers = scaler.inverse_transform(cluster_centers_scaled)
-
-cluster_profiles = pd.DataFrame(
-    cluster_centers,
-    # here we take every other column (aka genres) except the cluster one.
-    columns=user_profile.columns.drop('cluster')
-)
-
-cluster_profiles.index.name = "cluster"
-# print(cluster_profiles)
-
-# naming the clusters as "xyz genre Fans"
-cluster_names = {}
-
-for cluster_id, row in cluster_profiles.iterrows():
-    top_genre = row.idxmax()
-    cluster_names[cluster_id] = f"{top_genre} Fans"
-
-# putting the correct cluster names in the user profiles
-# each user id has a cluster next to it
-user_profile['cluster_name'] = user_profile['cluster'].map(cluster_names)
-
 # Question: C
-
-# this is basically the same as the normal movies, but here we simplify the table for the recommendation systems
-# as to avoid ifs and comparissons when calculating the cos sim.
-movie_profiles = movies.copy()
-movie_profiles.set_index('movieId', inplace=True)
 
 # in this function to calculate the pearson similarity, which we will use later
 
@@ -168,7 +65,8 @@ def recommend_cb(user_profile_row, movie_profiles, K):
     # then we inverse them to be in descending order and we pic the K highest rated ones
     similarities = cosine_similarity(user_vec, movie_vecs).flatten()
     top_indices = similarities.argsort()[::-1][:K]
-    return movie_profiles.iloc[top_indices].copy()
+
+    return movie_profiles.iloc[top_indices].assign(score=similarities[top_indices])
 
 # for the rest of the recommnder systems I will keep comments sparse for code legibility
 
@@ -220,7 +118,8 @@ def recommend_cf(user_id, ratings_train, N, K):
     # we inverse them to be in descending order and we pic the K highest rated ones
     top_movies = sorted(pred_ratings.items(),
                         key=lambda x: x[1], reverse=True)[:K]
-    return pd.DataFrame(top_movies, columns=['movieId', 'predicted_rating'])
+
+    return pd.DataFrame(top_movies, columns=['movieId', 'score']).set_index('movieId')
 
 # Σύστημα βάση περιεχομένου με βάση το cluster:
 
@@ -239,10 +138,17 @@ def recommend_cb_cluster(user_id, user_profile, cluster_profiles, movie_profiles
 
     # final K movies that get recommened
     user_vec = user_row[all_genres].values.reshape(1, -1)
+    subset_vecs = movie_vecs[top_L_indices]
+
     sims_user = cosine_similarity(
-        user_vec, movie_vecs[top_L_indices]).flatten()
-    top_K_indices = top_L_indices[sims_user.argsort()[::-1][:K]]
-    return movie_profiles.iloc[top_K_indices].copy()
+        user_vec, subset_vecs).flatten()
+
+    top_K_local_indices = sims_user.argsort()[::-1][:K]
+    top_K_global_indices = top_L_indices[top_K_local_indices]
+
+    recs = movie_profiles.iloc[top_K_global_indices].copy()
+    recs['score'] = sims_user[top_K_local_indices]
+    return recs
 
 # Σύστημα συνεργατικού φιλτραρίσματος με βάση το cluster
 
@@ -293,7 +199,8 @@ def recommend_cf_cluster(user_id, ratings_train, user_profile, N, K):
 
     top_movies = sorted(pred_ratings.items(),
                         key=lambda x: x[1], reverse=True)[:K]
-    return pd.DataFrame(top_movies, columns=['movieId', 'predicted_rating'])
+
+    return pd.DataFrame(top_movies, columns=['movieId', 'score']).set_index('movieId')
 
 # Question D
 # here we calculate the MAE, Precision, Recall and Spearman Correlation
@@ -341,10 +248,241 @@ def calculate_metrics(user_id, recommendations, ratings_test, user_mean, K):
             mae = np.mean(np.abs(preds - actuals))
 
     # Spearman Correlation
-    # correlation between the rank and the actual grade
     spearman = np.nan
-    if len(common_movies) > 1:
-        spearman, _ = stats.spearmanr(recommendations.loc[common_movies, 'score'],
-                                      user_test_data.set_index('movieId').loc[common_movies, 'rating'])
+
+    # Top-K recommended movies
+    topk_recs = recommendations.head(K)
+
+    # Keep only movies that appear in test set
+    user_test_data = user_test_data.set_index('movieId')
+    common_movies = topk_recs.index.intersection(user_test_data.index)
+
+    if len(common_movies) >= 2:
+        # Predicted scores (order given by recommender)
+        pred_scores = topk_recs.loc[common_movies, 'score']
+
+        # Actual ratings from test set
+        true_ratings = user_test_data.loc[common_movies, 'rating']
+
+        # Convert to ranks
+        pred_ranks = pred_scores.rank(ascending=False)
+        true_ranks = true_ratings.rank(ascending=False)
+
+        spearman, _ = stats.spearmanr(pred_ranks, true_ranks)
 
     return {"MAE": mae, "Precision": precision, "Recall": recall, "Spearman": spearman}
+
+# Evaluation and Experiments
+
+
+# Question A continues here
+# we want to do this globaly (for every experiment) cause the genres are the same and do not change between experiments
+movies["genres_list"] = movies["genres"].str.split("|")
+all_genres = sorted(
+    {genre for sublist in movies['genres_list'] for genre in sublist})
+
+for genre in all_genres:
+    movies[genre] = movies["genres"].apply(lambda x: 1 if genre in x else 0)
+
+# this is basically the same as the normal movies, but here we simplify the table for the recommendation systems
+# as to avoid ifs and comparissons when calculating the cos sim.
+movie_profiles = movies.drop(
+    ["genres", "genres_list"], axis=1).set_index('movieId')
+
+
+def run_experiment(config_list, experiment_name):
+    print(f"--- Starting {experiment_name} ---")
+    results = []
+
+    # Seeds for the 3 repetitions required
+    seeds = [8, 6, 2]
+
+    for config in config_list:
+        split_ratio = config.get('split', 0.8)  # default 0.8 train
+        N_val = config.get('N', 20)
+        K_val = config.get('K', 10)
+
+        print(f"Running: Split={split_ratio}, N={N_val}, K={K_val}...")
+
+        seed_results = []
+
+        for seed in seeds:
+            # 1. Split Data
+            r_train, r_test = train_test_split_per_user(
+                ratings, test_size=(1-split_ratio), seed=seed)
+
+            # 2. Create User Profiles (Question A continuation)
+            # we re-create profiles here to avoid data leakage
+            movies_exploded = movies.explode("genres_list")
+            ratings_merged = r_train.merge(movies_exploded.rename(
+                columns={'genres_list': 'genres'}), on="movieId")
+
+            user_profile = ratings_merged.groupby(["userId", "genres"])[
+                "rating"].mean().unstack(fill_value=0)
+
+            # ensure all genre columns exist for consistency
+            for g in all_genres:
+                if g not in user_profile.columns:
+                    user_profile[g] = 0
+            user_profile = user_profile[all_genres]
+
+            X = user_profile[["(no genres listed)", "Action", "Adventure", "Animation", "Children", "Comedy", "Crime", "Documentary", "Drama",
+                              "Fantasy", "Film-Noir", "Horror", "IMAX", "Musical", "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western"]]
+
+            # we have to scale the because the silhouette score uses distances, and not scaling will not work very well
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X)
+
+            silhouette_scores = {}
+            models = {}
+
+            # in this for loop we are checking each k in the kmeans and we are trying to see which one is the best
+            # by first finding each silhouette score for each k and then storing both the model and the score in a table/ list
+            for k in [3, 4, 5]:
+                kmeans = KMeans(
+                    n_clusters=k,
+                    random_state=575,
+                    n_init='auto'
+                )
+
+                labels = kmeans.fit_predict(X_scaled)
+                score = silhouette_score(X_scaled, labels)
+
+                silhouette_scores[k] = score
+                models[k] = kmeans
+
+                # print(f"K = {k}, Silhouette Score = {score:.4f}")
+
+            # find the best k for the clustering
+            best_k = max(silhouette_scores, key=silhouette_scores.get)
+            best_model = models[best_k]
+
+            # print(f"Best k = {best_k}")
+
+            # assining the clusters to the users
+            user_profile['cluster'] = best_model.labels_
+
+            # we had the scaled the clusters and since they are scaled we have to "unscale" them
+            cluster_centers_scaled = best_model.cluster_centers_
+            cluster_centers = scaler.inverse_transform(cluster_centers_scaled)
+
+            cluster_profiles = pd.DataFrame(
+                cluster_centers,
+                # here we take every other column (aka genres) except the cluster one.
+                columns=user_profile.columns.drop('cluster')
+            )
+
+            cluster_profiles.index.name = "cluster"
+            # print(cluster_profiles)
+
+            # naming the clusters as "xyz genre Fans"
+            cluster_names = {}
+
+            for cluster_id, row in cluster_profiles.iterrows():
+                top_genre = row.idxmax()
+                cluster_names[cluster_id] = f"{top_genre} Fans"
+
+            # putting the correct cluster names in the user profiles
+            # each user id has a cluster next to it
+            user_profile['cluster_name'] = user_profile['cluster'].map(
+                cluster_names)
+
+            # 4. Run Evaluation (Question D continuation)
+            metrics_acc = {"CB": [], "CF": [],
+                           "CB_Cluster": [], "CF_Cluster": []}
+
+            test_users = r_test['userId'].unique()
+
+            for uid in test_users:
+                u_mean = r_train[r_train['userId'] == uid]['rating'].mean()
+
+                # Run Systems
+                try:
+                    recs = recommend_cb(
+                        user_profile.loc[uid], movie_profiles, K_val, all_genres)
+                    m = calculate_metrics(uid, recs, r_test, u_mean, K_val)
+                    if m:
+                        metrics_acc["CB"].append(m)
+                except KeyError:
+                    pass
+
+                try:
+                    recs = recommend_cf(uid, r_train, N_val, K_val)
+                    m = calculate_metrics(uid, recs, r_test, u_mean, K_val)
+                    if m:
+                        metrics_acc["CF"].append(m)
+                except:
+                    pass
+
+                try:
+                    recs = recommend_cb_cluster(
+                        uid, user_profile, cluster_profiles, movie_profiles, K_val, all_genres)
+                    m = calculate_metrics(uid, recs, r_test, u_mean, K_val)
+                    if m:
+                        metrics_acc["CB_Cluster"].append(m)
+                except KeyError:
+                    pass
+
+                try:
+                    recs = recommend_cf_cluster(
+                        uid, r_train, user_profile, N_val, K_val)
+                    m = calculate_metrics(uid, recs, r_test, u_mean, K_val)
+                    if m:
+                        metrics_acc["CF_Cluster"].append(m)
+                except:
+                    pass
+
+            # aggregate results for this seed
+            for sys_name, m_list in metrics_acc.items():
+                if m_list:
+                    df_m = pd.DataFrame(m_list)
+                    avg = df_m.mean(numeric_only=True).to_dict()
+                    avg['System'] = sys_name
+                    avg.update(config)
+                    seed_results.append(avg)
+
+        # aggregate results across the 3 seeds
+        df_seeds = pd.DataFrame(seed_results)
+        if not df_seeds.empty:
+            group_cols = ['System'] + list(config.keys())
+            df_final = df_seeds.groupby(group_cols).mean(
+                numeric_only=True).reset_index()
+            results.extend(df_final.to_dict('records'))
+
+    return pd.DataFrame(results)
+
+# Define Experiments
+
+
+# Experiment 1: Split Ratios (N=20, K=10)
+configs_exp1 = [
+    {'split': 0.7, 'N': 20, 'K': 10},
+    {'split': 0.8, 'N': 20, 'K': 10},
+    {'split': 0.9, 'N': 20, 'K': 10}
+]
+df_exp1 = run_experiment(configs_exp1, "Experiment 1 (Splits)")
+
+# Experiment 2: Neighbors (Split=80/20, K=10)
+configs_exp2 = [
+    {'split': 0.8, 'N': 10, 'K': 10},
+    {'split': 0.8, 'N': 20, 'K': 10},
+    {'split': 0.8, 'N': 50, 'K': 10}
+]
+df_exp2 = run_experiment(configs_exp2, "Experiment 2 (Neighbors)")
+
+# Experiment 3: Top K (Split=80/20, N=20)
+configs_exp3 = [
+    {'split': 0.8, 'N': 20, 'K': 5},
+    {'split': 0.8, 'N': 20, 'K': 10},
+    {'split': 0.8, 'N': 20, 'K': 20}
+]
+df_exp3 = run_experiment(configs_exp3, "Experiment 3 (Top-K)")
+
+# Export to Excel
+print("Exporting results to 'experiment_results.xlsx'...")
+with pd.ExcelWriter('experiment_results.xlsx') as writer:
+    df_exp1.to_excel(writer, sheet_name='Exp1_Split', index=False)
+    df_exp2.to_excel(writer, sheet_name='Exp2_Neighbors', index=False)
+    df_exp3.to_excel(writer, sheet_name='Exp3_TopK', index=False)
+
+print("Evaluation Complete.")
