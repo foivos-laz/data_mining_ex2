@@ -1,17 +1,55 @@
 import pandas as pd
+import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
+
+TEST_SPLIT = 0.3
+SEED = 123
 
 # Question: A
 movies = pd.read_csv('movies.csv')
 ratings = pd.read_csv('ratings.csv')
 
+# here we are creating a custom splitting algorythm since the default one offered by the libraries above won't work
+# given the instructions "Για την αποτίμηση των συστημάτων θα χρησιμοποιήσετε διαχωρισμό σε σύνολο εκπαίδευσης/ελέγχου ανά χρήστη"
+
+
+def train_test_split_per_user(ratings, test_size=0.3, seed=42):
+    np.random.seed(seed)
+    train_parts = []
+    test_parts = []
+
+    # here we iterate using userId to comply with the requirement of the instuction (seen in the above comment before the def ...)
+    for user_id, group in ratings.groupby("userId"):
+        # here we mix the ratings of every user so we don't take the same first or last ones everytime we run the algorythm
+        # basically making the selection of the ratings random, removing the bias of their appearence within the data set
+        group = group.sample(frac=1, random_state=seed)
+        # this computes the amount of test ratings by mutliplying their amount with the %test and then rounding it to the closest intS
+        n_test = int(len(group) * test_size)
+
+        # here we are seperating the data into test and train
+        test_parts.append(group.iloc[:n_test])
+        train_parts.append(group.iloc[n_test:])
+
+    # for both test and train this part merges all of the above user based spliting in one and reorganises it
+    # so it starts correctly
+    return (
+        pd.concat(train_parts).reset_index(drop=True),
+        pd.concat(test_parts).reset_index(drop=True)
+    )
+
+
+# we are splitting the data here since if we do it later, we might have data leakage, as well as
+# not evaluating the recommender systems very well or accurately
+ratings_train, ratings_test = train_test_split_per_user(
+    ratings, TEST_SPLIT, seed=SEED)
+
 # here we want to split the genres of each movie and put it in the ratings table
 # as to make it easier, because the current way they are formated isn't too helpful
 movies["genres"] = movies["genres"].str.split("|")
 movies_exploded = movies.explode("genres")
-ratings_with_merged_genres = ratings.merge(movies_exploded, on="movieId")
+ratings_with_merged_genres = ratings_train.merge(movies_exploded, on="movieId")
 
 # here we create the users as data frames that have the userID and the genres with their means.
 # it is important to have it as such, as to not lose the information of which genre is which with traditional list.
